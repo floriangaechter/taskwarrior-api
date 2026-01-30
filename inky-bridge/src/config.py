@@ -75,11 +75,15 @@ class Settings(BaseSettings):
 
     @property
     def client_id(self) -> str:
-        return self.TASKCHAMPION_CLIENT_ID
+        # Normalize to lowercase (UUIDs should be lowercase)
+        return self.TASKCHAMPION_CLIENT_ID.lower()
 
     @property
     def encryption_secret(self) -> str:
         secret = (self.TASKCHAMPION_ENCRYPTION_SECRET or "").strip()
+        # Strip surrounding quotes if present (in case .env parsing left them)
+        if len(secret) >= 2 and secret[0] == secret[-1] and secret[0] in ('"', "'"):
+            secret = secret[1:-1]
         if not secret:
             raise ConfigurationError(
                 "TASKCHAMPION_ENCRYPTION_SECRET is empty or missing. "

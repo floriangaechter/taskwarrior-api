@@ -70,16 +70,15 @@ def normalize_task(task: taskchampion.Task) -> Task:
     status = _map_status(task.get_status())
     project = task.get_value("project") or None
 
+    # Use built-in is_active() method from taskchampion-py API
+    active = task.is_active()
+
     entry_ts = task.get_entry()
     modified_ts = task.get_modified()
     scheduled_ts_str = task.get_value("scheduled")
     scheduled_ts = _parse_scheduled_timestamp(scheduled_ts_str) if scheduled_ts_str else None
-    # Start timestamp: task is "active" when this is set (task start)
-    start_ts = None
-    if hasattr(task, "get_start"):
-        start_ts = task.get_start()
-    if start_ts is None:
-        start_ts = _parse_start_value(task.get_value("start"))
+    # Start timestamp from task properties
+    start_ts = _parse_start_value(task.get_value("start"))
     wait_ts = task.get_wait()
 
     timestamps = TaskTimestamps(
@@ -96,7 +95,7 @@ def normalize_task(task: taskchampion.Task) -> Task:
         description=description,
         status=status,
         project=project,
-        active=start_ts is not None,
+        active=active,
         timestamps=timestamps,
     )
 

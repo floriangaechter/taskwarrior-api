@@ -65,16 +65,20 @@ class ReplicaManager:
         if reset_first:
             self._reset_replica_dir(data_dir)
 
+        # Normalize client_id to lowercase (UUIDs should be lowercase)
+        normalized_client_id = client_id.lower()
         last_error: Optional[Exception] = None
+
         for attempt in range(1, SYNC_RETRY_ATTEMPTS + 1):
             try:
                 logger.info(
-                    f"Sync attempt {attempt}/{SYNC_RETRY_ATTEMPTS} at {data_dir} with {sync_server_url}"
+                    f"Sync attempt {attempt}/{SYNC_RETRY_ATTEMPTS} at {data_dir} with {sync_server_url} "
+                    f"(client_id={normalized_client_id})"
                 )
                 replica = taskchampion.Replica.new_on_disk(data_dir, True)
                 replica.sync_to_remote(
                     sync_server_url,
-                    client_id,
+                    normalized_client_id,
                     encryption_secret,
                     False,  # avoid_snapshots = False
                 )
@@ -89,7 +93,7 @@ class ReplicaManager:
                     time.sleep(SYNC_RETRY_DELAY_SECONDS)
                 else:
                     logger.error(
-                        f"Sync failed: {e} (server={sync_server_url}, client_id={client_id[:8]}...)",
+                        f"Sync failed: {e} (server={sync_server_url}, client_id={normalized_client_id})",
                         exc_info=(attempt == SYNC_RETRY_ATTEMPTS),
                     )
                     return False

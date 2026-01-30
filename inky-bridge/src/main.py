@@ -158,7 +158,8 @@ async def startup() -> None:
         logger.info(f"Configuration loaded successfully")
         logger.info(f"  Sync server: {config.sync_server_url}")
         logger.info(f"  Replica directory: {config.data_dir}")
-        logger.info(f"  Client ID: {config.client_id[:8]}...")
+        logger.info(f"  Client ID: {config.client_id}")  # Now lowercase
+        logger.info(f"  Encryption secret length: {len(config.encryption_secret)}")
         logger.info(f"  Auth required: {config.requires_auth()}")
     except ConfigurationError as e:
         logger.error(f"Configuration error: {e}", exc_info=True)
