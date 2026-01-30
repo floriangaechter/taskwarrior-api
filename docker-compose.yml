@@ -4,6 +4,7 @@ volumes:
 
 services:
   sync-server:
+    container_name: taskwarrior-sync-server
     image: ghcr.io/gothenburgbitfactory/taskchampion-sync-server:latest
     restart: unless-stopped
     ports:
@@ -19,6 +20,7 @@ services:
       - sync-server-data:/var/lib/taskchampion-sync-server/data
 
   inky-bridge:
+    container_name: taskwarrior-inky-bridge
     build:
       context: ./inky-bridge
       dockerfile: Dockerfile
