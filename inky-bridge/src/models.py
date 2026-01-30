@@ -31,6 +31,7 @@ class Task(BaseModel):
     short_id: str = Field(..., description="First 8 characters of UUID for display")
     description: str = Field(..., description="Task description")
     status: str = Field(..., description="Task status (e.g., pending, completed)")
+    project: Optional[str] = Field(None, description="Task project (area/responsibility)")
     tags: List[str] = Field(..., description="List of task tags")
     tags_sort_key: str = Field(..., description="Deterministic sort key: comma-joined sorted tags")
     timestamps: TaskTimestamps = Field(..., description="Task timestamps")

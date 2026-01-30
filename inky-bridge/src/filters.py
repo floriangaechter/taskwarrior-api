@@ -79,6 +79,8 @@ def normalize_task(task: taskchampion.Task) -> Task:
     # Get task properties
     description = task.get_description() or ""
     status = _map_status(task.get_status())
+    # Project (Taskwarrior UDA / area) - used for grouping and sort
+    project = task.get_value("project") or None
 
     # Get tags - get_tags() returns list of Tag objects
     tags = sorted(str(tag) for tag in task.get_tags())
@@ -103,6 +105,7 @@ def normalize_task(task: taskchampion.Task) -> Task:
         short_id=short_id,
         description=description,
         status=status,
+        project=project,
         tags=tags,
         tags_sort_key=tags_sort_key,
         timestamps=timestamps,
@@ -128,18 +131,14 @@ def apply_overview_filter(tasks: List[Task]) -> List[Task]:
 
 def apply_overview_sort(tasks: List[Task]) -> List[Task]:
     """
-    Apply overview report sort: tags_sort_key ascending, then entry timestamp ascending.
+    Apply overview report sort: project ascending, then entry timestamp ascending.
 
-    Args:
-        tasks: List of normalized tasks
-
-    Returns:
-        Sorted list of tasks
+    Matches report.overview.sort=project+,entry+
     """
     return sorted(
         tasks,
         key=lambda t: (
-            t.tags_sort_key,
+            t.project or "",
             t.timestamps.entry,
         ),
     )
