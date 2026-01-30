@@ -14,6 +14,9 @@ from .exceptions import ReplicaError
 
 logger = logging.getLogger(__name__)
 
+SYNC_RETRY_ATTEMPTS = 3
+SYNC_RETRY_DELAY_SECONDS = 2
+
 
 class ReplicaManager:
     def __init__(self):
@@ -37,28 +40,42 @@ class ReplicaManager:
     def _sync_blocking(
         self, data_dir: str, sync_server_url: str, client_id: str, encryption_secret: str
     ) -> bool:
-        """Blocking sync in thread pool; uses a fresh Replica in this thread (not shared)."""
-        try:
-            # Create replica in this thread (thread pool thread)
-            logger.info(f"Creating replica in sync thread at {data_dir}")
-            replica = taskchampion.Replica.new_on_disk(data_dir, True)
-            logger.info(f"Starting sync with server at {sync_server_url}")
-            replica.sync_to_remote(
-                sync_server_url,
-                client_id,
-                encryption_secret,
-                False,  # avoid_snapshots = False
-            )
-            logger.info("Sync completed successfully")
-            return True
-        except Exception as e:
-            logger.error(
-                f"Sync failed: {e} (server={sync_server_url}, client_id={client_id[:8]}...). "
-                "Check: (1) TASKCHAMPION_CLIENT_ID and TASKCHAMPION_ENCRYPTION_SECRET match your Taskwarrior client, "
-                "(2) ALLOW_CLIENT_IDS on sync-server includes this client_id if set, (3) sync-server logs.",
-                exc_info=True,
-            )
-            return False
+        """Blocking sync in thread pool; uses a fresh Replica in this thread (not shared). Retries on transient failure."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, SYNC_RETRY_ATTEMPTS + 1):
+            try:
+                logger.info(
+                    f"Sync attempt {attempt}/{SYNC_RETRY_ATTEMPTS} at {data_dir} with {sync_server_url}"
+                )
+                replica = taskchampion.Replica.new_on_disk(data_dir, True)
+                replica.sync_to_remote(
+                    sync_server_url,
+                    client_id,
+                    encryption_secret,
+                    False,  # avoid_snapshots = False
+                )
+                logger.info("Sync completed successfully")
+                return True
+            except RuntimeError as e:
+                last_error = e
+                if "synchronize with server" in str(e) and attempt < SYNC_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"Sync attempt {attempt} failed, retrying in {SYNC_RETRY_DELAY_SECONDS}s: {e}"
+                    )
+                    time.sleep(SYNC_RETRY_DELAY_SECONDS)
+                else:
+                    logger.error(
+                        f"Sync failed: {e} (server={sync_server_url}, client_id={client_id[:8]}...)",
+                        exc_info=(attempt == SYNC_RETRY_ATTEMPTS),
+                    )
+                    return False
+            except Exception as e:
+                last_error = e
+                logger.error(f"Sync failed: {e}", exc_info=True)
+                return False
+        if last_error:
+            logger.error(f"Sync failed after {SYNC_RETRY_ATTEMPTS} attempts: {last_error}")
+        return False
 
     async def sync_with_timeout(self) -> bool:
         """Single-flight sync with timeout; returns True if sync succeeded."""
