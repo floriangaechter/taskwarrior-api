@@ -1,4 +1,4 @@
-"""FastAPI application for inky-bridge."""
+"""FastAPI app: /overview (sync-on-demand + overview tasks), /health."""
 
 import logging
 import time
@@ -37,7 +37,6 @@ app.add_middleware(
 
 
 def check_auth(request: Request) -> None:
-    """Check API authentication if configured."""
     config = get_config()
     if not config.requires_auth():
         return
@@ -59,7 +58,6 @@ def check_auth(request: Request) -> None:
 
 @app.middleware("http")
 async def logging_middleware(request: Request, call_next):
-    """Structured logging middleware."""
     start_time = time.time()
     logger.info(f"Request: {request.method} {request.url.path}")
     response = await call_next(request)
@@ -70,11 +68,7 @@ async def logging_middleware(request: Request, call_next):
 
 @app.get("/overview", response_model=OverviewResponse)
 async def get_overview(request: Request) -> OverviewResponse:
-    """
-    Get overview report: pending tasks excluding someday, sorted by tags and entry.
-
-    Performs on-demand sync before returning data. Returns stale data if sync fails.
-    """
+    """Overview report (pending only, sort project+entry). Syncs on demand; on failure returns stale data."""
     check_auth(request)
 
     replica_manager = get_replica_manager()
@@ -131,11 +125,7 @@ async def get_overview(request: Request) -> OverviewResponse:
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    """
-    Health check endpoint.
-
-    Does NOT trigger a sync. Returns service status and last sync information.
-    """
+    """Liveness; does not trigger sync."""
     try:
         replica_manager = get_replica_manager()
         config = get_config()
@@ -162,7 +152,6 @@ async def health() -> HealthResponse:
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize application on startup."""
     logger.info("Starting inky-bridge")
     try:
         config = get_config()
@@ -181,5 +170,4 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Cleanup on shutdown."""
     logger.info("Shutting down inky-bridge")

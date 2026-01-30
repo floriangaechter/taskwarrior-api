@@ -1,4 +1,4 @@
-"""Task filtering and sorting logic."""
+"""Overview filter (pending only) and sort (project, entry)."""
 
 import taskchampion
 from datetime import datetime
@@ -10,21 +10,11 @@ from .constants import (
     STATUS_PENDING,
     STATUS_RECURRING,
     STATUS_UNKNOWN,
-    TAG_SOMEDAY,
 )
 from .models import Task, TaskTimestamps, format_timestamp
 
 
 def _map_status(status_obj: taskchampion.Status) -> str:
-    """
-    Map TaskChampion Status enum to string.
-
-    Args:
-        status_obj: TaskChampion Status enum value
-
-    Returns:
-        Lowercase status string
-    """
     if status_obj == taskchampion.Status.Pending:
         return STATUS_PENDING
     elif status_obj == taskchampion.Status.Completed:
@@ -44,15 +34,6 @@ def _map_status(status_obj: taskchampion.Status) -> str:
 
 
 def _parse_scheduled_timestamp(scheduled_str: str) -> datetime | None:
-    """
-    Parse scheduled timestamp string to datetime.
-
-    Args:
-        scheduled_str: ISO 8601 timestamp string
-
-    Returns:
-        Datetime object or None if parsing fails
-    """
     if not scheduled_str:
         return None
 
@@ -64,29 +45,14 @@ def _parse_scheduled_timestamp(scheduled_str: str) -> datetime | None:
 
 
 def normalize_task(task: taskchampion.Task) -> Task:
-    """
-    Convert TaskChampion Task to normalized Task model.
-
-    Args:
-        task: TaskChampion Task object
-
-    Returns:
-        Normalized Task model
-    """
+    """TaskChampion Task → our Task model (UUID, description, status, timestamps, project)."""
     uuid_str = str(task.get_uuid())
     short_id = uuid_str[:8]
 
-    # Get task properties
     description = task.get_description() or ""
     status = _map_status(task.get_status())
-    # Project (Taskwarrior UDA / area) - used for grouping and sort
     project = task.get_value("project") or None
 
-    # Get tags - get_tags() returns list of Tag objects
-    tags = sorted(str(tag) for tag in task.get_tags())
-    tags_sort_key = ",".join(tags)
-
-    # Get timestamps
     entry_ts = task.get_entry()
     modified_ts = task.get_modified()
     scheduled_ts_str = task.get_value("scheduled")
@@ -106,35 +72,17 @@ def normalize_task(task: taskchampion.Task) -> Task:
         description=description,
         status=status,
         project=project,
-        tags=tags,
-        tags_sort_key=tags_sort_key,
         timestamps=timestamps,
     )
 
 
 def apply_overview_filter(tasks: List[Task]) -> List[Task]:
-    """
-    Apply overview report filter: status==pending, exclude someday tag.
-
-    Args:
-        tasks: List of normalized tasks
-
-    Returns:
-        Filtered list of tasks matching overview criteria
-    """
-    return [
-        task
-        for task in tasks
-        if task.status == STATUS_PENDING and TAG_SOMEDAY not in task.tags
-    ]
+    """Pending only."""
+    return [task for task in tasks if task.status == STATUS_PENDING]
 
 
 def apply_overview_sort(tasks: List[Task]) -> List[Task]:
-    """
-    Apply overview report sort: project ascending, then entry timestamp ascending.
-
-    Matches report.overview.sort=project+,entry+
-    """
+    """Sort by project, then entry (report.overview.sort=project+,entry+)."""
     return sorted(
         tasks,
         key=lambda t: (

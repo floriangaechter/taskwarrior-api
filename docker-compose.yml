@@ -4,7 +4,7 @@ volumes:
 
 services:
   sync-server:
-    image: ghcr.io/gothenburgbitfactory/taskchampion-sync-server:0.7.1
+    image: ghcr.io/gothenburgbitfactory/taskchampion-sync-server:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -28,13 +28,12 @@ services:
     environment:
       - TASKCHAMPION_SYNC_SERVER_URL=${TASKCHAMPION_SYNC_SERVER_URL:-http://sync-server:8080}
       - TASKCHAMPION_CLIENT_ID=${TASKCHAMPION_CLIENT_ID}
+      - TASKCHAMPION_ENCRYPTION_SECRET=${TASKCHAMPION_ENCRYPTION_SECRET}
       - DATA_DIR=${DATA_DIR:-/data/replica}
       - SYNC_TIMEOUT_SECONDS=${SYNC_TIMEOUT_SECONDS:-30}
       - MIN_SYNC_INTERVAL_SECONDS=${MIN_SYNC_INTERVAL_SECONDS:-10}
       - AUTH_SECRET=${AUTH_SECRET:-}
       - TZ=Europe/Zurich
-    secrets:
-      - taskchampion_encryption_secret
     volumes:
       - inky-bridge-data:/data/replica
     depends_on:
@@ -46,7 +45,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-
-secrets:
-  taskchampion_encryption_secret:
-    file: ./secrets/taskchampion_encryption_secret.txt

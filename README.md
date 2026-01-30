@@ -1,15 +1,13 @@
 # TaskChampion Inky Bridge
 
-A Dockerized setup providing a read-only HTTP JSON API for TaskChampion tasks, designed for use with a Pimoroni Inky Frame display.
+Docker setup: sync server plus a small read-only HTTP JSON API for TaskChampion tasks (e.g. for a Pimoroni Inky Frame).
 
-## Overview
+Two services:
 
-This project consists of two services:
+- **taskchampion-sync-server** — official TaskChampion sync server (Taskwarrior 3 backend)
+- **inky-bridge** — trusted client replica that holds the encryption secret and exposes tasks via REST
 
-1. **taskchampion-sync-server**: The official TaskChampion sync server (Taskwarrior 3 / TaskChampion sync backend)
-2. **inky-bridge**: A small read-only HTTP JSON API that acts as a trusted TaskChampion client replica
-
-The bridge maintains a local replica of your encrypted task data and exposes it via a REST API, implementing the semantics of Taskwarrior's "overview" report.
+The bridge keeps a local replica of your encrypted data and serves it as JSON, matching Taskwarrior’s “overview” report (pending only, sorted by project then entry).
 
 ## Architecture
 
@@ -33,15 +31,7 @@ git clone <repository-url>
 cd taskwarrior-api
 ```
 
-2. **Create secrets directory**
-
-```bash
-mkdir -p secrets
-echo "your-encryption-secret-here" > secrets/taskchampion_encryption_secret.txt
-chmod 600 secrets/taskchampion_encryption_secret.txt
-```
-
-3. **Configure environment variables**
+2. **Configure environment variables**
 
 Copy `.env.example` to `.env` and fill in the values:
 
@@ -53,23 +43,24 @@ cp .env.example .env
 Required variables:
 - `TASKCHAMPION_SYNC_SERVER_URL`: URL of the sync server (default: `http://sync-server:8080` for internal Docker networking)
 - `TASKCHAMPION_CLIENT_ID`: Client ID for the bridge replica (must match the client ID used by your Taskwarrior clients - see [Configuring Taskwarrior Clients](#configuring-taskwarrior-clients))
+- `TASKCHAMPION_ENCRYPTION_SECRET`: Encryption secret (must match your Taskwarrior `sync.encryption_secret`)
 
 Optional variables:
-- `ALLOW_CLIENT_IDS`: Comma-separated list of client IDs allowed to connect to the sync server (leave empty to allow all). This provides basic access control - only clients with matching client IDs will be able to sync.
-
-Optional variables:
+- `ALLOW_CLIENT_IDS`: Comma-separated list of client IDs allowed to connect to the sync server (leave empty to allow all)
 - `DATA_DIR`: Replica storage directory (default: `/data/replica`)
 - `SYNC_TIMEOUT_SECONDS`: Sync timeout (default: `30`)
 - `MIN_SYNC_INTERVAL_SECONDS`: Minimum sync interval (default: `10`)
 - `AUTH_SECRET`: API authentication secret (optional)
 
-4. **Start the services**
+Don’t commit `.env` — it contains secrets.
+
+3. **Start the services**
 
 ```bash
 docker compose up -d
 ```
 
-5. **Verify services are running**
+4. **Verify services are running**
 
 ```bash
 # Check sync server health (exposed on port 8080)
@@ -79,7 +70,7 @@ curl http://localhost:8080/health
 curl http://localhost:8000/health
 ```
 
-**Note**: The sync server is exposed on port 8080 for your external reverse proxy to forward requests. The bridge uses the internal Docker network (`sync-server:8080`) to communicate with the sync server.
+Sync server is on 8080 for your reverse proxy; the bridge talks to it over the Docker network as `sync-server:8080`.
 
 ## Configuring Taskwarrior Clients
 
@@ -157,10 +148,8 @@ Update your `.env` file to use the **same** client ID and encryption secret:
 ```bash
 # In .env file
 TASKCHAMPION_CLIENT_ID=85038910-8fe2-480d-b6cb-6e7fabc1fa44
-# Encryption secret goes in secrets/taskchampion_encryption_secret.txt
+TASKCHAMPION_ENCRYPTION_SECRET=your-long-encryption-secret-here
 ```
-
-Also update `secrets/taskchampion_encryption_secret.txt` with the same encryption secret.
 
 ### Step 4: Initial Sync
 
@@ -257,20 +246,12 @@ task export > backup.json
 
 **Bridge shows stale data**:
 - Check bridge logs: `docker compose logs inky-bridge`
-- Verify bridge uses same client ID and encryption secret
+- Verify bridge `.env` has same client ID and encryption secret as Taskwarrior
 - Manually trigger sync by calling `/overview` endpoint
 
 ## Configuration
 
-### Environment Variables
-
-See `.env.example` for all available configuration options.
-
-### Docker Secrets
-
-The encryption secret is stored as a Docker secret file at `secrets/taskchampion_encryption_secret.txt`. This file is mounted into the container and read at startup.
-
-**Important**: Never commit the secrets directory to version control. Add it to `.gitignore`.
+Config is via environment variables; see `.env.example` for all options. Docker Compose injects your `.env` into the bridge. Don’t commit `.env` (keep it in `.gitignore`).
 
 ### Sync Server Access Control
 
@@ -291,10 +272,7 @@ These volumes persist across container restarts.
 
 ### End-to-End Encryption
 
-- Task data is encrypted end-to-end using the encryption secret
-- The sync server cannot decrypt task data
-- The bridge holds the encryption secret and maintains a trusted replica
-- Only the bridge can decrypt and expose plaintext task data
+Tasks are encrypted with your secret before they hit the sync server; the server never sees plaintext. The bridge holds the secret and keeps a local replica, so only the bridge can decrypt and serve task data.
 
 ### API Authentication
 
@@ -304,11 +282,9 @@ Optional API authentication can be enabled by setting `AUTH_SECRET`. When enable
 Authorization: Bearer <AUTH_SECRET>
 ```
 
-### Secrets Management
+### Secrets
 
-- Encryption secret is stored as a Docker secret file (not in environment variables)
-- Never log encryption secrets or full decrypted task payloads
-- Replica storage is mounted as a persistent volume
+Encryption secret lives in `TASKCHAMPION_ENCRYPTION_SECRET` in `.env`. Don’t commit `.env`, don’t log secrets or decrypted payloads. Replica data is on a persistent volume.
 
 ## On-Demand Sync Behavior
 
@@ -317,18 +293,16 @@ Every request to `/overview` triggers a sync attempt with the following safeguar
 1. **Single-Flight Lock**: Concurrent requests share a single sync operation
 2. **Timeout Protection**: Sync operations timeout after `SYNC_TIMEOUT_SECONDS`
 3. **Min Interval**: Syncs are skipped if the last sync was within `MIN_SYNC_INTERVAL_SECONDS`
-4. **Stale Fallback**: If sync fails or times out, the API returns the last locally available data with `meta.stale=true`
-
-This ensures the API remains responsive even if the sync server is unavailable.
+4. **Stale Fallback**: If sync fails or times out, the API still returns the last local data with `meta.stale=true`
 
 ## API Documentation
 
 ### GET /overview
 
-Returns tasks matching the Taskwarrior "overview" report semantics:
+Same semantics as Taskwarrior’s overview report:
 
-- **Filter**: `status == "pending"` AND tag `"someday"` NOT present
-- **Sort**: By `tags_sort_key` ascending, then `entry` timestamp ascending
+- **Filter**: `status == "pending"`
+- **Sort**: `project` ascending, then `entry` timestamp ascending
 
 **Response**:
 
@@ -346,8 +320,7 @@ Returns tasks matching the Taskwarrior "overview" report semantics:
       "short_id": "a1b2c3d4",
       "description": "Review PR #123",
       "status": "pending",
-      "tags": ["work", "urgent"],
-      "tags_sort_key": "urgent,work",
+      "project": "work",
       "timestamps": {
         "entry": "2026-01-20T10:00:00+01:00",
         "modified": "2026-01-25T14:30:00+01:00",
@@ -359,15 +332,11 @@ Returns tasks matching the Taskwarrior "overview" report semantics:
 }
 ```
 
-**Meta Fields**:
-- `sync_ok`: Whether the sync completed successfully
-- `stale`: Whether the returned data is stale (sync failed/timed out)
-- `last_sync_at`: ISO 8601 timestamp of last successful sync (Europe/Zurich timezone)
-- `duration_ms`: Sync operation duration in milliseconds
+**Meta**: `sync_ok` (sync succeeded), `stale` (sync failed or timed out), `last_sync_at` (ISO 8601, Europe/Zurich), `duration_ms` (sync duration).
 
 ### GET /health
 
-Health check endpoint. Does NOT trigger a sync.
+Liveness check. Does not run a sync.
 
 **Response**:
 
@@ -383,39 +352,22 @@ Health check endpoint. Does NOT trigger a sync.
 
 All task objects follow this normalized schema:
 
-- `uuid` (string): Task UUID (primary identifier)
-- `short_id` (string): First 8 characters of UUID for display convenience
+- `uuid` (string): Task UUID
+- `short_id` (string): First 8 chars of UUID
 - `description` (string): Task description
-- `status` (string): Task status (e.g., `pending`, `completed`, `deleted`)
-- `tags` (array of strings): List of task tags
-- `tags_sort_key` (string): Deterministic sort key (`",".join(sorted(tags))`)
+- `status` (string): e.g. `pending`, `completed`, `deleted`
+- `project` (string or null): Taskwarrior project/area
 - `timestamps` (object):
   - `entry` (string): ISO 8601 timestamp (Europe/Zurich)
   - `modified` (string): ISO 8601 timestamp (Europe/Zurich)
   - `scheduled` (string or null): ISO 8601 timestamp or null
   - `wait` (string or null): ISO 8601 timestamp or null
 
-### Timezone
-
-All timestamps are returned in ISO 8601 format with Europe/Zurich timezone offset (DST-aware: `+01:00` or `+02:00` as appropriate).
-
-Example: `2026-01-27T08:00:23+01:00`
-
-Null timestamps are returned as `null` (not omitted).
+Timestamps are ISO 8601 in Europe/Zurich (`+01:00` / `+02:00`). Nulls are `null`, not omitted.
 
 ## Logging
 
-The bridge uses structured logging with the following log levels:
-
-- `INFO`: Normal operations (requests, syncs)
-- `WARNING`: Sync failures, timeouts
-- `ERROR`: Errors, exceptions
-
-Logs include:
-- Request method and path
-- Response status and duration
-- Sync start/end/failure with durations
-- Never includes secrets or full decrypted task payloads
+Structured logs: request path, response status/duration, sync start/end/fail and duration. INFO for normal ops, WARNING for sync failures/timeouts, ERROR for exceptions. Secrets and decrypted payloads are never logged.
 
 ## Troubleshooting
 
@@ -425,7 +377,7 @@ If syncs are failing:
 
 1. Check sync server logs: `docker compose logs sync-server`
 2. Verify sync server URL is correct
-3. Check encryption secret is correct
+3. Check `TASKCHAMPION_ENCRYPTION_SECRET` in `.env` matches Taskwarrior
 4. Verify client IDs match your TaskChampion setup
 
 ### Stale Data
@@ -480,4 +432,4 @@ docker compose logs -f sync-server
 
 ## License
 
-[Add your license here]
+MIT — see [LICENSE](LICENSE).

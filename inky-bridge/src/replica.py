@@ -1,4 +1,4 @@
-"""Replica management and sync logic."""
+"""Replica + sync: single-flight, timeout, min interval, stale fallback."""
 
 import asyncio
 import logging
@@ -10,14 +10,12 @@ from typing import List, Optional
 import taskchampion
 
 from .config import get_config
-from .exceptions import ReplicaError, SyncError
+from .exceptions import ReplicaError
 
 logger = logging.getLogger(__name__)
 
 
 class ReplicaManager:
-    """Manages TaskChampion replica and synchronization."""
-
     def __init__(self):
         self.config = get_config()
         self._replica: Optional[taskchampion.Replica] = None
@@ -28,13 +26,7 @@ class ReplicaManager:
         self._last_sync_success: Optional[datetime] = None
 
     def _get_replica(self) -> taskchampion.Replica:
-        """
-        Get or create the replica instance.
-        
-        IMPORTANT: Replica objects are NOT thread-safe and must be accessed
-        from the same thread. This method should only be called from the
-        main event loop thread, not from thread pool executors.
-        """
+        """Replica is not thread-safe; only call from main thread, not from executor."""
         if self._replica is None:
             logger.info(f"Initializing replica at {self.config.data_dir}")
             self._replica = taskchampion.Replica.new_on_disk(
@@ -45,24 +37,7 @@ class ReplicaManager:
     def _sync_blocking(
         self, data_dir: str, sync_server_url: str, client_id: str, encryption_secret: str
     ) -> bool:
-        """
-        Perform sync operation (blocking, runs in thread pool).
-
-        Creates a new Replica instance in this thread since Replica is not
-        thread-safe and cannot be shared across threads.
-
-        Args:
-            data_dir: Path to replica data directory
-            sync_server_url: URL of sync server
-            client_id: Client ID for sync
-            encryption_secret: Encryption secret
-
-        Returns:
-            True if sync succeeded, False otherwise
-
-        Raises:
-            SyncError: If sync fails with a non-recoverable error
-        """
+        """Blocking sync in thread pool; uses a fresh Replica in this thread (not shared)."""
         try:
             # Create replica in this thread (thread pool thread)
             logger.info(f"Creating replica in sync thread at {data_dir}")
@@ -82,12 +57,7 @@ class ReplicaManager:
             return False
 
     async def sync_with_timeout(self) -> bool:
-        """
-        Perform sync with timeout and single-flight lock.
-
-        Returns:
-            True if sync succeeded, False otherwise
-        """
+        """Single-flight sync with timeout; returns True if sync succeeded."""
         # Check min sync interval
         now = time.time()
         if (
@@ -148,18 +118,7 @@ class ReplicaManager:
                 return False
 
     def get_all_tasks(self) -> List[taskchampion.Task]:
-        """
-        Get all tasks from replica.
-
-        IMPORTANT: This must be called from the main event loop thread,
-        not from a thread pool executor, since Replica is not thread-safe.
-
-        Returns:
-            List of TaskChampion Task objects
-
-        Raises:
-            ReplicaError: If task retrieval fails
-        """
+        """Call from main thread only (Replica not thread-safe). Raises ReplicaError on failure."""
         try:
             replica = self._get_replica()
             # all_tasks() returns a dict[str, Task], convert to list
@@ -170,16 +129,13 @@ class ReplicaManager:
             raise ReplicaError(f"Failed to retrieve tasks: {e}") from e
 
     def get_last_sync_time(self) -> Optional[datetime]:
-        """Get timestamp of last successful sync."""
         return self._last_sync_success
 
 
-# Global replica manager instance
 _replica_manager: Optional[ReplicaManager] = None
 
 
 def get_replica_manager() -> ReplicaManager:
-    """Get the global replica manager instance."""
     global _replica_manager
     if _replica_manager is None:
         _replica_manager = ReplicaManager()
