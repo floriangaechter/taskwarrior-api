@@ -2,9 +2,11 @@
 
 import asyncio
 import logging
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 import taskchampion
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 SYNC_RETRY_ATTEMPTS = 3
 SYNC_RETRY_DELAY_SECONDS = 2
+CONSECUTIVE_FAILURES_BEFORE_RESET = 3
 
 
 class ReplicaManager:
@@ -27,6 +30,7 @@ class ReplicaManager:
         self._last_sync_time: Optional[float] = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sync")
         self._last_sync_success: Optional[datetime] = None
+        self._consecutive_sync_failures = 0
 
     def _get_replica(self) -> taskchampion.Replica:
         """Replica is not thread-safe; only call from main thread, not from executor."""
@@ -37,10 +41,30 @@ class ReplicaManager:
             )
         return self._replica
 
+    def _reset_replica_dir(self, data_dir: str) -> None:
+        """Clear replica directory so next sync starts from scratch. Call from sync thread only."""
+        path = Path(data_dir)
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path)
+            path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Replica directory reset at {data_dir}")
+        except Exception as e:
+            logger.error(f"Failed to reset replica directory {data_dir}: {e}", exc_info=True)
+
     def _sync_blocking(
-        self, data_dir: str, sync_server_url: str, client_id: str, encryption_secret: str
+        self,
+        data_dir: str,
+        sync_server_url: str,
+        client_id: str,
+        encryption_secret: str,
+        reset_first: bool = False,
     ) -> bool:
         """Blocking sync in thread pool; uses a fresh Replica in this thread (not shared). Retries on transient failure."""
+        if reset_first:
+            self._reset_replica_dir(data_dir)
+
         last_error: Optional[Exception] = None
         for attempt in range(1, SYNC_RETRY_ATTEMPTS + 1):
             try:
@@ -105,17 +129,27 @@ class ReplicaManager:
             self._last_sync_time = now
             start_time = time.time()
 
+            # After consecutive failures, reset replica and try once from scratch
+            reset_first = self._consecutive_sync_failures >= CONSECUTIVE_FAILURES_BEFORE_RESET
+            if reset_first:
+                logger.warning(
+                    f"Consecutive sync failures ({self._consecutive_sync_failures}), "
+                    "resetting replica and re-syncing from server"
+                )
+                self._consecutive_sync_failures = 0
+                self._replica = None  # main thread must not use old replica after reset
+
             try:
-                # Run sync in thread pool with timeout
-                # Pass config values as arguments since Replica can't be shared across threads
                 success = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         self._executor,
-                        self._sync_blocking,
-                        self.config.data_dir,
-                        self.config.sync_server_url,
-                        self.config.client_id,
-                        self.config.encryption_secret,
+                        lambda: self._sync_blocking(
+                            self.config.data_dir,
+                            self.config.sync_server_url,
+                            self.config.client_id,
+                            self.config.encryption_secret,
+                            reset_first,
+                        ),
                     ),
                     timeout=self.config.sync_timeout_seconds,
                 )
@@ -123,10 +157,14 @@ class ReplicaManager:
                 if success:
                     logger.info(f"Sync succeeded in {duration_ms}ms")
                     self._last_sync_success = datetime.utcnow()
-                    # Force next get_all_tasks() to open replica from disk so we see synced data
+                    self._consecutive_sync_failures = 0
                     self._replica = None
                 else:
-                    logger.warning(f"Sync failed after {duration_ms}ms")
+                    self._consecutive_sync_failures += 1
+                    logger.warning(
+                        f"Sync failed after {duration_ms}ms "
+                        f"(consecutive failures: {self._consecutive_sync_failures})"
+                    )
                 return success
             except asyncio.TimeoutError:
                 duration_ms = int((time.time() - start_time) * 1000)
