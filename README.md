@@ -373,12 +373,14 @@ Structured logs: request path, response status/duration, sync start/end/fail and
 
 ### Sync Failures
 
-If syncs are failing:
+If you see **"Failed to synchronize with server"** (RuntimeError from taskchampion-py):
 
-1. Check sync server logs: `docker compose logs sync-server`
-2. Verify sync server URL is correct
-3. Check `TASKCHAMPION_ENCRYPTION_SECRET` in `.env` matches Taskwarrior
-4. Verify client IDs match your TaskChampion setup
+1. **Client ID and encryption secret** — The bridge must use the **same** `TASKCHAMPION_CLIENT_ID` and `TASKCHAMPION_ENCRYPTION_SECRET` as your Taskwarrior client. Copy `sync.server.client_id` and `sync.encryption_secret` from your taskrc (or `task show`) into `.env`.
+2. **Sync server allow-list** — If `ALLOW_CLIENT_IDS` is set on the sync-server, the bridge’s client ID must be in that list.
+3. **Sync server logs** — Run `docker compose logs sync-server` (or `docker logs sync-server`) and look for rejections or errors when the bridge connects.
+4. **Reachability** — From the bridge container, the sync server must be reachable at `TASKCHAMPION_SYNC_SERVER_URL` (e.g. `http://sync-server:8080` on the Compose network). If you changed the sync-server port or hostname, update the bridge’s env.
+
+If syncs are failing for other reasons, also verify the sync server URL and that the sync-server container is running.
 
 ### Stale Data
 

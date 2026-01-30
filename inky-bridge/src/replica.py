@@ -52,8 +52,12 @@ class ReplicaManager:
             logger.info("Sync completed successfully")
             return True
         except Exception as e:
-            logger.error(f"Sync failed: {e}", exc_info=True)
-            # Don't raise - return False to allow stale data fallback
+            logger.error(
+                f"Sync failed: {e} (server={sync_server_url}, client_id={client_id[:8]}...). "
+                "Check: (1) TASKCHAMPION_CLIENT_ID and TASKCHAMPION_ENCRYPTION_SECRET match your Taskwarrior client, "
+                "(2) ALLOW_CLIENT_IDS on sync-server includes this client_id if set, (3) sync-server logs.",
+                exc_info=True,
+            )
             return False
 
     async def sync_with_timeout(self) -> bool:
