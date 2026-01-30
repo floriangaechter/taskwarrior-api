@@ -106,6 +106,8 @@ class ReplicaManager:
                 if success:
                     logger.info(f"Sync succeeded in {duration_ms}ms")
                     self._last_sync_success = datetime.utcnow()
+                    # Force next get_all_tasks() to open replica from disk so we see synced data
+                    self._replica = None
                 else:
                     logger.warning(f"Sync failed after {duration_ms}ms")
                 return success
