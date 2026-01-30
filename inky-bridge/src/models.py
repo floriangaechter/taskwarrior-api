@@ -13,6 +13,7 @@ class TaskTimestamps(BaseModel):
     entry: str
     modified: str
     scheduled: Optional[str] = None
+    start: Optional[str] = None  # set when task is active (task start)
     wait: Optional[str] = None
 
 
@@ -22,6 +23,7 @@ class Task(BaseModel):
     description: str
     status: str
     project: Optional[str] = None
+    active: bool = False  # True when task has been started (task start) and not yet completed
     timestamps: TaskTimestamps
 
 

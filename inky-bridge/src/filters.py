@@ -2,7 +2,8 @@
 
 import taskchampion
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from .constants import (
     STATUS_COMPLETED,
@@ -44,6 +45,22 @@ def _parse_scheduled_timestamp(scheduled_str: str) -> datetime | None:
         return None
 
 
+def _parse_start_value(start_val: Optional[str]) -> datetime | None:
+    """Parse start timestamp from get_value('start') — may be epoch or ISO string."""
+    if not start_val:
+        return None
+    try:
+        # Epoch (decimal) as used by Taskwarrior
+        epoch = float(start_val)
+        return datetime.fromtimestamp(epoch, tz=ZoneInfo("UTC"))
+    except (ValueError, TypeError, OSError):
+        pass
+    try:
+        return datetime.fromisoformat(str(start_val).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def normalize_task(task: taskchampion.Task) -> Task:
     """TaskChampion Task → our Task model (UUID, description, status, timestamps, project)."""
     uuid_str = str(task.get_uuid())
@@ -57,12 +74,19 @@ def normalize_task(task: taskchampion.Task) -> Task:
     modified_ts = task.get_modified()
     scheduled_ts_str = task.get_value("scheduled")
     scheduled_ts = _parse_scheduled_timestamp(scheduled_ts_str) if scheduled_ts_str else None
+    # Start timestamp: task is "active" when this is set (task start)
+    start_ts = None
+    if hasattr(task, "get_start"):
+        start_ts = task.get_start()
+    if start_ts is None:
+        start_ts = _parse_start_value(task.get_value("start"))
     wait_ts = task.get_wait()
 
     timestamps = TaskTimestamps(
         entry=format_timestamp(entry_ts) or "",
         modified=format_timestamp(modified_ts) or "",
         scheduled=format_timestamp(scheduled_ts),
+        start=format_timestamp(start_ts),
         wait=format_timestamp(wait_ts),
     )
 
@@ -72,6 +96,7 @@ def normalize_task(task: taskchampion.Task) -> Task:
         description=description,
         status=status,
         project=project,
+        active=start_ts is not None,
         timestamps=timestamps,
     )
 

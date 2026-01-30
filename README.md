@@ -321,10 +321,12 @@ Same semantics as Taskwarrior’s overview report:
       "description": "Review PR #123",
       "status": "pending",
       "project": "work",
+      "active": false,
       "timestamps": {
         "entry": "2026-01-20T10:00:00+01:00",
         "modified": "2026-01-25T14:30:00+01:00",
         "scheduled": null,
+        "start": null,
         "wait": null
       }
     }
@@ -357,10 +359,12 @@ All task objects follow this normalized schema:
 - `description` (string): Task description
 - `status` (string): e.g. `pending`, `completed`, `deleted`
 - `project` (string or null): Taskwarrior project/area
+- `active` (boolean): `true` when the task has been started (`task start`) and not yet completed; `false` otherwise
 - `timestamps` (object):
   - `entry` (string): ISO 8601 timestamp (Europe/Zurich)
   - `modified` (string): ISO 8601 timestamp (Europe/Zurich)
   - `scheduled` (string or null): ISO 8601 timestamp or null
+  - `start` (string or null): when set, task is active (started with `task start`); ISO 8601 (Europe/Zurich) or null
   - `wait` (string or null): ISO 8601 timestamp or null
 
 Timestamps are ISO 8601 in Europe/Zurich (`+01:00` / `+02:00`). Nulls are `null`, not omitted.
