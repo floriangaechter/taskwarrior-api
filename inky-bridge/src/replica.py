@@ -88,13 +88,18 @@ class ReplicaWorker:
     def _extract_task_data(self, task: taskchampion.Task) -> TaskData:
         """Extract plain Python data from TaskChampion Task object."""
         status_obj = task.get_status()
-        status_map = {
-            taskchampion.Status.Pending: "pending",
-            taskchampion.Status.Completed: "completed",
-            taskchampion.Status.Deleted: "deleted",
-            taskchampion.Status.Recurring: "recurring",
-        }
-        status = status_map.get(status_obj, "unknown")
+        
+        # Map status using equality checks (Status enum isn't hashable)
+        if status_obj == taskchampion.Status.Pending:
+            status = "pending"
+        elif status_obj == taskchampion.Status.Completed:
+            status = "completed"
+        elif status_obj == taskchampion.Status.Deleted:
+            status = "deleted"
+        elif status_obj == taskchampion.Status.Recurring:
+            status = "recurring"
+        else:
+            status = "unknown"
         
         return TaskData(
             uuid=str(task.get_uuid()),
