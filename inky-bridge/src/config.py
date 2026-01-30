@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .constants import (
@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     TASKCHAMPION_ENCRYPTION_SECRET: str = Field(
         ..., description="Encryption secret (same as Taskwarrior sync.encryption_secret)"
     )
+
+    @model_validator(mode="after")
+    def check_encryption_secret(self) -> "Settings":
+        secret = (self.TASKCHAMPION_ENCRYPTION_SECRET or "").strip()
+        if not secret:
+            raise ValueError(
+                "TASKCHAMPION_ENCRYPTION_SECRET is empty or missing. "
+                "Set it in .env next to docker-compose.yml and run 'docker compose up' from that directory. "
+                "Check with: docker compose run --rm inky-bridge env | grep TASKCHAMPION"
+            )
+        return self
 
     # Optional configuration with defaults
     DATA_DIR: str = Field(default=DEFAULT_DATA_DIR, description="Replica storage directory")
@@ -68,9 +79,13 @@ class Settings(BaseSettings):
 
     @property
     def encryption_secret(self) -> str:
-        if not self.TASKCHAMPION_ENCRYPTION_SECRET:
-            raise ConfigurationError("Encryption secret not set")
-        return self.TASKCHAMPION_ENCRYPTION_SECRET
+        secret = (self.TASKCHAMPION_ENCRYPTION_SECRET or "").strip()
+        if not secret:
+            raise ConfigurationError(
+                "TASKCHAMPION_ENCRYPTION_SECRET is empty or missing. "
+                "Set it in .env and ensure the container receives it (e.g. run from the project dir: docker compose up)."
+            )
+        return secret
 
     @property
     def data_dir(self) -> str:
