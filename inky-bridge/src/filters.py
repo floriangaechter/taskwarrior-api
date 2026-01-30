@@ -1,118 +1,59 @@
-"""Overview filter (pending only) and sort (project, entry)."""
+"""Convert TaskData to Task model, filter (pending only), sort (project, entry)."""
 
-import taskchampion
 from datetime import datetime
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-from .constants import (
-    STATUS_COMPLETED,
-    STATUS_DELETED,
-    STATUS_PENDING,
-    STATUS_RECURRING,
-    STATUS_UNKNOWN,
-)
 from .models import Task, TaskTimestamps, format_timestamp
+from .replica import TaskData
 
 
-def _map_status(status_obj: taskchampion.Status) -> str:
-    if status_obj == taskchampion.Status.Pending:
-        return STATUS_PENDING
-    elif status_obj == taskchampion.Status.Completed:
-        return STATUS_COMPLETED
-    elif status_obj == taskchampion.Status.Deleted:
-        return STATUS_DELETED
-    elif status_obj == taskchampion.Status.Recurring:
-        return STATUS_RECURRING
-    elif status_obj == taskchampion.Status.Unknown:
-        return STATUS_UNKNOWN
-    else:
-        # Fallback: try string conversion
-        status_str = str(status_obj)
-        if "." in status_str:
-            return status_str.split(".")[-1].lower()
-        return status_str.lower() if status_str else STATUS_PENDING
-
-
-def _parse_scheduled_timestamp(scheduled_str: str) -> datetime | None:
-    if not scheduled_str:
+def _parse_timestamp_string(ts_str: Optional[str]) -> Optional[datetime]:
+    """Parse timestamp string (epoch or ISO) to datetime."""
+    if not ts_str:
         return None
-
+    
+    # Try epoch first (Taskwarrior stores as decimal)
     try:
-        # Try parsing ISO 8601 format
-        return datetime.fromisoformat(scheduled_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-
-
-def _parse_start_value(start_val: Optional[str]) -> datetime | None:
-    """Parse start timestamp from get_value('start') — may be epoch or ISO string."""
-    if not start_val:
-        return None
-    try:
-        # Epoch (decimal) as used by Taskwarrior
-        epoch = float(start_val)
+        epoch = float(ts_str)
         return datetime.fromtimestamp(epoch, tz=ZoneInfo("UTC"))
     except (ValueError, TypeError, OSError):
         pass
+    
+    # Try ISO format
     try:
-        return datetime.fromisoformat(str(start_val).replace("Z", "+00:00"))
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
 
 
-def normalize_task(task: taskchampion.Task) -> Task:
-    """TaskChampion Task → our Task model (UUID, description, status, timestamps, project)."""
-    uuid_str = str(task.get_uuid())
-    short_id = uuid_str[:8]
-
-    description = task.get_description() or ""
-    status = _map_status(task.get_status())
-    project = task.get_value("project") or None
-
-    # Use built-in is_active() method from taskchampion-py API
-    active = task.is_active()
-
-    entry_ts = task.get_entry()
-    modified_ts = task.get_modified()
-    scheduled_ts_str = task.get_value("scheduled")
-    scheduled_ts = _parse_scheduled_timestamp(scheduled_ts_str) if scheduled_ts_str else None
-    # Start timestamp from task properties
-    start_ts = _parse_start_value(task.get_value("start"))
-    wait_ts = task.get_wait()
-
+def task_data_to_model(td: TaskData) -> Task:
+    """Convert TaskData (from replica) to Task model (for API response)."""
+    
+    # Parse string timestamps
+    scheduled_dt = _parse_timestamp_string(td.scheduled)
+    start_dt = _parse_timestamp_string(td.start)
+    
     timestamps = TaskTimestamps(
-        entry=format_timestamp(entry_ts) or "",
-        modified=format_timestamp(modified_ts) or "",
-        scheduled=format_timestamp(scheduled_ts),
-        start=format_timestamp(start_ts),
-        wait=format_timestamp(wait_ts),
+        entry=format_timestamp(td.entry) or "",
+        modified=format_timestamp(td.modified) or "",
+        scheduled=format_timestamp(scheduled_dt),
+        start=format_timestamp(start_dt),
+        wait=format_timestamp(td.wait),
     )
-
+    
     return Task(
-        uuid=uuid_str,
-        short_id=short_id,
-        description=description,
-        status=status,
-        project=project,
-        active=active,
+        uuid=td.uuid,
+        short_id=td.uuid[:8],
+        description=td.description,
+        status=td.status,
+        project=td.project,
+        active=td.is_active,
         timestamps=timestamps,
     )
 
 
-def apply_overview_filter(tasks: List[Task]) -> List[Task]:
-    """Pending only."""
-    return [task for task in tasks if task.status == STATUS_PENDING]
-
-
-def apply_overview_sort(tasks: List[Task]) -> List[Task]:
-    """Sort by project, then entry (report.overview.sort=project+,entry+)."""
-    return sorted(
-        tasks,
-        key=lambda t: (
-            t.project or "",
-            t.timestamps.entry,
-        ),
-    )
-
-
+def filter_and_sort_overview(tasks: List[Task]) -> List[Task]:
+    """Filter to pending only, sort by project then entry."""
+    pending = [t for t in tasks if t.status == "pending"]
+    return sorted(pending, key=lambda t: (t.project or "", t.timestamps.entry))

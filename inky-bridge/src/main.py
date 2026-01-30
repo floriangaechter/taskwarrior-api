@@ -7,12 +7,11 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_config
-from .exceptions import ConfigurationError, InkyBridgeError, ReplicaError
-from .filters import apply_overview_filter, apply_overview_sort, normalize_task
+from .exceptions import ConfigurationError
+from .filters import filter_and_sort_overview, task_data_to_model
 from .models import HealthResponse, OverviewResponse, SyncMeta, format_timestamp
-from .replica import get_replica_manager
+from .replica import get_replica_worker
 
-# Configure structured logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -26,7 +25,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware (allow all origins - adjust as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,7 +46,7 @@ def check_auth(request: Request) -> None:
             detail="Missing or invalid Authorization header",
         )
 
-    token = auth_header[7:]  # Remove "Bearer " prefix
+    token = auth_header[7:]
     if token != config.auth_secret:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -68,76 +66,52 @@ async def logging_middleware(request: Request, call_next):
 
 @app.get("/overview", response_model=OverviewResponse)
 async def get_overview(request: Request) -> OverviewResponse:
-    """Overview report (pending only, sort project+entry). Syncs on demand; on failure returns stale data."""
+    """Overview report (pending only, sort project+entry). Syncs on demand."""
     check_auth(request)
 
-    replica_manager = get_replica_manager()
+    worker = get_replica_worker()
     start_time = time.time()
 
-    # Attempt sync (non-blocking, returns stale data on failure)
-    sync_ok = await replica_manager.sync_with_timeout()
+    # Sync and read tasks in one operation
+    result = worker.sync_and_read()
     duration_ms = int((time.time() - start_time) * 1000)
 
-    # Get tasks from replica
+    # Convert TaskData to Task models and filter/sort
     try:
-        tasks_raw = replica_manager.get_all_tasks()
-        logger.debug(f"Retrieved {len(tasks_raw)} tasks from replica")
+        tasks = [task_data_to_model(td) for td in result.tasks]
+        filtered_sorted = filter_and_sort_overview(tasks)
 
-        # Normalize tasks, skipping any that fail to normalize
-        tasks = []
-        for task in tasks_raw:
-            try:
-                normalized = normalize_task(task)
-                tasks.append(normalized)
-            except Exception as e:
-                task_uuid = task.get_uuid() if hasattr(task, "get_uuid") else "unknown"
-                logger.warning(f"Skipping task {task_uuid}: normalization failed: {e}")
-                continue
-
-        # Apply overview filter and sort
-        filtered_tasks = apply_overview_filter(tasks)
-        sorted_tasks = apply_overview_sort(filtered_tasks)
-
-        # Build response
-        last_sync = replica_manager.get_last_sync_time()
         meta = SyncMeta(
-            sync_ok=sync_ok,
-            stale=not sync_ok,
-            last_sync_at=format_timestamp(last_sync) if last_sync else None,
+            sync_ok=result.success,
+            stale=not result.success,
+            last_sync_at=format_timestamp(worker.last_sync_time),
             duration_ms=duration_ms,
         )
 
-        return OverviewResponse(meta=meta, tasks=sorted_tasks)
+        return OverviewResponse(meta=meta, tasks=filtered_sorted)
 
-    except ReplicaError as e:
-        logger.error(f"Replica error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve tasks from replica",
-        ) from e
     except Exception as e:
-        logger.error(f"Unexpected error processing overview: {e}", exc_info=True)
+        logger.error(f"Error processing tasks: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error",
+            detail="Failed to process tasks",
         ) from e
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    """Liveness; does not trigger sync."""
+    """Liveness check; does not trigger sync."""
     try:
-        replica_manager = get_replica_manager()
+        worker = get_replica_worker()
         config = get_config()
-        last_sync = replica_manager.get_last_sync_time()
 
         return HealthResponse(
             status="healthy",
-            last_sync_at=format_timestamp(last_sync) if last_sync else None,
+            last_sync_at=format_timestamp(worker.last_sync_time),
             replica_path=config.data_dir,
         )
     except ConfigurationError as e:
-        logger.error(f"Configuration error in health check: {e}")
+        logger.error(f"Configuration error: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service misconfigured",
@@ -155,17 +129,21 @@ async def startup() -> None:
     logger.info("Starting inky-bridge")
     try:
         config = get_config()
-        logger.info(f"Configuration loaded successfully")
+        logger.info("Configuration loaded:")
         logger.info(f"  Sync server: {config.sync_server_url}")
-        logger.info(f"  Replica directory: {config.data_dir}")
-        logger.info(f"  Client ID: {config.client_id}")  # Now lowercase
-        logger.info(f"  Encryption secret length: {len(config.encryption_secret)}")
+        logger.info(f"  Replica dir: {config.data_dir}")
+        logger.info(f"  Client ID: {config.client_id}")
+        logger.info(f"  Secret length: {len(config.encryption_secret)}")
         logger.info(f"  Auth required: {config.requires_auth()}")
+        
+        # Initialize the worker (but don't sync yet)
+        get_replica_worker()
+        logger.info("Replica worker initialized")
     except ConfigurationError as e:
         logger.error(f"Configuration error: {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Failed to initialize: {e}", exc_info=True)
+        logger.error(f"Startup failed: {e}", exc_info=True)
         raise
 
 

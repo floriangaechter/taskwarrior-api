@@ -1,10 +1,10 @@
-"""Replica + sync: single-flight, timeout, min interval, stale fallback."""
+"""Replica management: sync + read tasks, all in one thread to avoid conflicts."""
 
-import asyncio
 import logging
 import shutil
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -12,196 +12,207 @@ from typing import List, Optional
 import taskchampion
 
 from .config import get_config
-from .exceptions import ReplicaError
 
 logger = logging.getLogger(__name__)
 
-SYNC_RETRY_ATTEMPTS = 3
-SYNC_RETRY_DELAY_SECONDS = 2
-CONSECUTIVE_FAILURES_BEFORE_RESET = 3
+SYNC_TIMEOUT_SECONDS = 30
+MAX_CONSECUTIVE_FAILURES = 3
 
 
-class ReplicaManager:
-    def __init__(self):
-        self.config = get_config()
+@dataclass
+class TaskData:
+    """Raw task data extracted from TaskChampion (thread-safe, plain Python)."""
+    uuid: str
+    status: str
+    description: str
+    project: Optional[str]
+    is_active: bool
+    entry: Optional[datetime]
+    modified: Optional[datetime]
+    scheduled: Optional[str]
+    start: Optional[str]
+    wait: Optional[datetime]
+
+
+@dataclass
+class SyncResult:
+    """Result of a sync + read operation."""
+    success: bool
+    tasks: List[TaskData]
+    error: Optional[str] = None
+
+
+class ReplicaWorker:
+    """
+    Manages all Replica operations in a dedicated thread.
+    
+    TaskChampion's Replica is not thread-safe, so we do ALL operations
+    (create, sync, read) in a single dedicated thread.
+    """
+    
+    def __init__(self, data_dir: str, sync_url: str, client_id: str, encryption_secret: str):
+        self.data_dir = data_dir
+        self.sync_url = sync_url
+        self.client_id = client_id.lower()  # UUIDs should be lowercase
+        self.encryption_secret = encryption_secret
+        
+        self._lock = threading.Lock()
         self._replica: Optional[taskchampion.Replica] = None
-        self._replica_lock = asyncio.Lock()  # Lock for replica access
-        self._sync_lock = asyncio.Lock()
-        self._last_sync_time: Optional[float] = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sync")
-        self._last_sync_success: Optional[datetime] = None
-        self._consecutive_sync_failures = 0
-
-    def _get_replica(self) -> taskchampion.Replica:
-        """Replica is not thread-safe; only call from main thread, not from executor."""
+        self._last_sync: Optional[datetime] = None
+        self._consecutive_failures = 0
+        self._cached_tasks: List[TaskData] = []
+    
+    def _ensure_data_dir(self) -> None:
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+    
+    def _reset_replica(self) -> None:
+        """Clear replica directory to start fresh."""
+        self._replica = None
+        path = Path(self.data_dir)
+        if path.exists():
+            try:
+                shutil.rmtree(path)
+                logger.info(f"Cleared replica directory: {self.data_dir}")
+            except Exception as e:
+                logger.error(f"Failed to clear replica dir: {e}")
+        self._ensure_data_dir()
+    
+    def _get_or_create_replica(self) -> taskchampion.Replica:
+        """Get existing replica or create new one."""
         if self._replica is None:
-            logger.info(f"Initializing replica at {self.config.data_dir}")
-            self._replica = taskchampion.Replica.new_on_disk(
-                self.config.data_dir, True
-            )
+            self._ensure_data_dir()
+            logger.info(f"Creating replica at {self.data_dir}")
+            self._replica = taskchampion.Replica.new_on_disk(self.data_dir, True)
         return self._replica
-
-    def _reset_replica_dir(self, data_dir: str) -> None:
-        """Clear replica directory so next sync starts from scratch. Call from sync thread only."""
-        path = Path(data_dir)
-        if not path.exists():
-            return
-        try:
-            shutil.rmtree(path)
-            path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Replica directory reset at {data_dir}")
-        except Exception as e:
-            logger.error(f"Failed to reset replica directory {data_dir}: {e}", exc_info=True)
-
-    def _sync_blocking(
-        self,
-        data_dir: str,
-        sync_server_url: str,
-        client_id: str,
-        encryption_secret: str,
-        reset_first: bool = False,
-    ) -> bool:
-        """Blocking sync in thread pool; uses a fresh Replica in this thread (not shared). Retries on transient failure."""
-        if reset_first:
-            self._reset_replica_dir(data_dir)
-
-        # Normalize client_id to lowercase (UUIDs should be lowercase)
-        normalized_client_id = client_id.lower()
-        last_error: Optional[Exception] = None
-
-        for attempt in range(1, SYNC_RETRY_ATTEMPTS + 1):
+    
+    def _extract_task_data(self, task: taskchampion.Task) -> TaskData:
+        """Extract plain Python data from TaskChampion Task object."""
+        status_obj = task.get_status()
+        status_map = {
+            taskchampion.Status.Pending: "pending",
+            taskchampion.Status.Completed: "completed",
+            taskchampion.Status.Deleted: "deleted",
+            taskchampion.Status.Recurring: "recurring",
+        }
+        status = status_map.get(status_obj, "unknown")
+        
+        return TaskData(
+            uuid=str(task.get_uuid()),
+            status=status,
+            description=task.get_description() or "",
+            project=task.get_value("project"),
+            is_active=task.is_active(),
+            entry=task.get_entry(),
+            modified=task.get_modified(),
+            scheduled=task.get_value("scheduled"),
+            start=task.get_value("start"),
+            wait=task.get_wait(),
+        )
+    
+    def _read_all_tasks(self) -> List[TaskData]:
+        """Read all tasks from replica. Must be called with lock held."""
+        replica = self._get_or_create_replica()
+        tasks_dict = replica.all_tasks()
+        return [self._extract_task_data(t) for t in tasks_dict.values()]
+    
+    def sync_and_read(self) -> SyncResult:
+        """
+        Sync with server and read all tasks.
+        
+        All operations happen under a lock to ensure only one thread
+        accesses the Replica at a time.
+        """
+        with self._lock:
+            # Check if we need to reset due to repeated failures
+            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.warning(
+                    f"Resetting replica after {self._consecutive_failures} consecutive failures"
+                )
+                self._reset_replica()
+                self._consecutive_failures = 0
+            
+            # Try to sync
             try:
+                replica = self._get_or_create_replica()
+                
                 logger.info(
-                    f"Sync attempt {attempt}/{SYNC_RETRY_ATTEMPTS} at {data_dir} with {sync_server_url} "
-                    f"(client_id={normalized_client_id})"
+                    f"Syncing with {self.sync_url} (client_id={self.client_id})"
                 )
-                replica = taskchampion.Replica.new_on_disk(data_dir, True)
+                start = time.time()
+                
                 replica.sync_to_remote(
-                    sync_server_url,
-                    normalized_client_id,
-                    encryption_secret,
-                    False,  # avoid_snapshots = False
+                    self.sync_url,
+                    self.client_id,
+                    self.encryption_secret,
+                    False,  # avoid_snapshots
                 )
-                logger.info("Sync completed successfully")
-                return True
-            except RuntimeError as e:
-                last_error = e
-                if "synchronize with server" in str(e) and attempt < SYNC_RETRY_ATTEMPTS:
-                    logger.warning(
-                        f"Sync attempt {attempt} failed, retrying in {SYNC_RETRY_DELAY_SECONDS}s: {e}"
-                    )
-                    time.sleep(SYNC_RETRY_DELAY_SECONDS)
-                else:
-                    logger.error(
-                        f"Sync failed: {e} (server={sync_server_url}, client_id={normalized_client_id})",
-                        exc_info=(attempt == SYNC_RETRY_ATTEMPTS),
-                    )
-                    return False
+                
+                elapsed_ms = int((time.time() - start) * 1000)
+                logger.info(f"Sync succeeded in {elapsed_ms}ms")
+                
+                self._last_sync = datetime.utcnow()
+                self._consecutive_failures = 0
+                
+                # Read tasks after successful sync
+                tasks = self._read_all_tasks()
+                self._cached_tasks = tasks
+                
+                return SyncResult(success=True, tasks=tasks)
+                
             except Exception as e:
-                last_error = e
-                logger.error(f"Sync failed: {e}", exc_info=True)
-                return False
-        if last_error:
-            logger.error(f"Sync failed after {SYNC_RETRY_ATTEMPTS} attempts: {last_error}")
-        return False
-
-    async def sync_with_timeout(self) -> bool:
-        """Single-flight sync with timeout; returns True if sync succeeded."""
-        # Check min sync interval
-        now = time.time()
-        if (
-            self._last_sync_time is not None
-            and (now - self._last_sync_time) < self.config.min_sync_interval_seconds
-        ):
-            logger.debug(
-                f"Skipping sync: min interval not met "
-                f"({now - self._last_sync_time:.1f}s < {self.config.min_sync_interval_seconds}s)"
-            )
-            return self._last_sync_success is not None
-
-        # Acquire lock (single-flight)
-        async with self._sync_lock:
-            # Double-check min interval after acquiring lock
-            now = time.time()
-            if (
-                self._last_sync_time is not None
-                and (now - self._last_sync_time) < self.config.min_sync_interval_seconds
-            ):
-                logger.debug("Skipping sync: another request already synced")
-                return self._last_sync_success is not None
-
-            self._last_sync_time = now
-            start_time = time.time()
-
-            # After consecutive failures, reset replica and try once from scratch
-            reset_first = self._consecutive_sync_failures >= CONSECUTIVE_FAILURES_BEFORE_RESET
-            if reset_first:
-                logger.warning(
-                    f"Consecutive sync failures ({self._consecutive_sync_failures}), "
-                    "resetting replica and re-syncing from server"
+                self._consecutive_failures += 1
+                error_msg = str(e)
+                logger.error(
+                    f"Sync failed (attempt {self._consecutive_failures}): {error_msg}"
                 )
-                self._consecutive_sync_failures = 0
-                self._replica = None  # main thread must not use old replica after reset
-
+                
+                # On failure, try to return cached/existing tasks
+                try:
+                    if not self._cached_tasks:
+                        self._cached_tasks = self._read_all_tasks()
+                    return SyncResult(
+                        success=False,
+                        tasks=self._cached_tasks,
+                        error=error_msg,
+                    )
+                except Exception as read_error:
+                    logger.error(f"Failed to read tasks: {read_error}")
+                    return SyncResult(
+                        success=False,
+                        tasks=[],
+                        error=f"Sync: {error_msg}, Read: {read_error}",
+                    )
+    
+    def read_only(self) -> List[TaskData]:
+        """Read tasks without syncing (for health checks, etc.)."""
+        with self._lock:
             try:
-                success = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        self._executor,
-                        lambda: self._sync_blocking(
-                            self.config.data_dir,
-                            self.config.sync_server_url,
-                            self.config.client_id,
-                            self.config.encryption_secret,
-                            reset_first,
-                        ),
-                    ),
-                    timeout=self.config.sync_timeout_seconds,
-                )
-                duration_ms = int((time.time() - start_time) * 1000)
-                if success:
-                    logger.info(f"Sync succeeded in {duration_ms}ms")
-                    self._last_sync_success = datetime.utcnow()
-                    self._consecutive_sync_failures = 0
-                    self._replica = None
-                else:
-                    self._consecutive_sync_failures += 1
-                    logger.warning(
-                        f"Sync failed after {duration_ms}ms "
-                        f"(consecutive failures: {self._consecutive_sync_failures})"
-                    )
-                return success
-            except asyncio.TimeoutError:
-                duration_ms = int((time.time() - start_time) * 1000)
-                logger.warning(
-                    f"Sync timed out after {duration_ms}ms "
-                    f"(timeout={self.config.sync_timeout_seconds}s)"
-                )
-                return False
+                return self._read_all_tasks()
             except Exception as e:
-                duration_ms = int((time.time() - start_time) * 1000)
-                logger.error(f"Sync error after {duration_ms}ms: {e}", exc_info=True)
-                return False
-
-    def get_all_tasks(self) -> List[taskchampion.Task]:
-        """Call from main thread only (Replica not thread-safe). Raises ReplicaError on failure."""
-        try:
-            replica = self._get_replica()
-            # all_tasks() returns a dict[str, Task], convert to list
-            tasks_dict = replica.all_tasks()
-            return list(tasks_dict.values())
-        except Exception as e:
-            logger.error(f"Failed to retrieve tasks from replica: {e}", exc_info=True)
-            raise ReplicaError(f"Failed to retrieve tasks: {e}") from e
-
-    def get_last_sync_time(self) -> Optional[datetime]:
-        return self._last_sync_success
+                logger.error(f"Failed to read tasks: {e}")
+                return self._cached_tasks
+    
+    @property
+    def last_sync_time(self) -> Optional[datetime]:
+        return self._last_sync
 
 
-_replica_manager: Optional[ReplicaManager] = None
+# Global worker instance
+_worker: Optional[ReplicaWorker] = None
+_worker_lock = threading.Lock()
 
 
-def get_replica_manager() -> ReplicaManager:
-    global _replica_manager
-    if _replica_manager is None:
-        _replica_manager = ReplicaManager()
-    return _replica_manager
+def get_replica_worker() -> ReplicaWorker:
+    """Get or create the global ReplicaWorker instance."""
+    global _worker
+    if _worker is None:
+        with _worker_lock:
+            if _worker is None:
+                config = get_config()
+                _worker = ReplicaWorker(
+                    data_dir=config.data_dir,
+                    sync_url=config.sync_server_url,
+                    client_id=config.client_id,
+                    encryption_secret=config.encryption_secret,
+                )
+    return _worker
