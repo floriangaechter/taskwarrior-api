@@ -72,11 +72,130 @@ Sync: download encrypted ops → decrypt with secret → apply to replica → (o
 
 ## Data model
 
-Tasks are keyed by UUID; we also expose `short_id` (first 8 chars). Status: `pending`, `completed`, `deleted`, `recurring`. Timestamps are UTC in the replica, exposed as Europe/Zurich ISO 8601; nulls are `null`.
+Tasks are keyed by UUID; we also expose `short_id` (first 8 chars). Status: `pending`, `completed`, `deleted`, `recurring`. `active` is true when the task has a start timestamp (started with `task start`). Timestamps (entry, modified, scheduled, start, wait) are UTC in the replica, exposed as Europe/Zurich ISO 8601; nulls are `null`.
 
 ## Overview report
 
 Filter: `status == "pending"`. Sort: `project` ascending, then `entry` ascending. Matches Taskwarrior’s overview.
+
+---
+
+## Client integration (display project)
+
+This section gives another project (e.g. an Inky Frame display app) everything needed to call the bridge API and render the task list. Copy or reference this when building the display client.
+
+### Base URL and endpoints
+
+- **Base URL**: The bridge is an HTTP JSON API. From the host running Docker, the default is `http://localhost:8089` (Compose maps host 8089 → container 8000). From another machine or the Inky device, use the hostname/IP and port where the bridge is exposed (e.g. `http://192.168.1.10:8089` or your reverse-proxy URL).
+- **GET /overview** — Main endpoint for the task list. Triggers a sync, then returns pending tasks. Use this for the display.
+- **GET /health** — Liveness; does not trigger sync. Use for startup checks or monitoring.
+
+### Authentication
+
+- If the bridge is run with **AUTH_SECRET** set, every request must include:
+  ```http
+  Authorization: Bearer <AUTH_SECRET>
+  ```
+  Missing or wrong token → **401 Unauthorized**.
+- If **AUTH_SECRET** is not set, no header is required.
+
+### GET /overview — request and response
+
+**Request**: `GET /overview` (no query parameters). Optional header: `Authorization: Bearer <secret>` if auth is enabled.
+
+**Response**: `200 OK`, JSON body:
+
+```json
+{
+  "meta": {
+    "sync_ok": true,
+    "stale": false,
+    "last_sync_at": "2026-01-30T15:00:00+01:00",
+    "duration_ms": 245
+  },
+  "tasks": [
+    {
+      "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "short_id": "a1b2c3d4",
+      "description": "Review PR #123",
+      "status": "pending",
+      "project": "work",
+      "active": true,
+      "timestamps": {
+        "entry": "2026-01-20T10:00:00+01:00",
+        "modified": "2026-01-25T14:30:00+01:00",
+        "scheduled": null,
+        "start": "2026-01-30T14:00:00+01:00",
+        "wait": null
+      }
+    }
+  ]
+}
+```
+
+- **meta.sync_ok** (boolean): `true` if the last sync succeeded.
+- **meta.stale** (boolean): `true` if sync failed or timed out; data is still returned but may be outdated. Safe to show a “data may be stale” hint.
+- **meta.last_sync_at** (string or null): ISO 8601 (Europe/Zurich) of last successful sync.
+- **meta.duration_ms** (number): Sync duration in milliseconds.
+- **tasks** (array): Pending tasks only, already sorted by `project` ascending, then `entry` ascending.
+
+### Task object (for display)
+
+| Field | Type | Meaning |
+|-------|------|--------|
+| `uuid` | string | Unique task ID. |
+| `short_id` | string | First 8 chars of UUID (e.g. for labels). |
+| `description` | string | Task title/description. |
+| `status` | string | Always `"pending"` in overview. |
+| `project` | string or null | Taskwarrior project/area; use for grouping or section headers. |
+| `active` | boolean | **`true`** = task has been started (`task start`), i.e. “currently working on”; **`false`** = waiting. Use this to distinguish active vs waiting (e.g. show active first or highlight). |
+| `timestamps` | object | All ISO 8601 in Europe/Zurich (`+01:00` / `+02:00`). |
+| `timestamps.entry` | string | When the task was created. |
+| `timestamps.modified` | string | Last modification. |
+| `timestamps.scheduled` | string or null | Scheduled start, if set. |
+| `timestamps.start` | string or null | When the task was started (`task start`); set iff `active` is true. |
+| `timestamps.wait` | string or null | Wait-until time, if set. |
+
+Nulls are JSON `null`, not omitted.
+
+### Display semantics
+
+- **Filter/sort**: The API already returns only pending tasks, sorted by `project` then `entry`. No client-side filter or sort required for a basic list.
+- **Active vs waiting**: Use `task.active` (or `task.timestamps.start !== null`) to show “in progress” vs “waiting” (e.g. active at top, or different style).
+- **Grouping**: Optionally group by `task.project`; order within a project follows the response order (by entry).
+- **Stale data**: If `meta.stale === true`, you can show a small “data may be outdated” indicator; still render `tasks` as usual.
+
+### Error handling
+
+| Status | Meaning |
+|--------|--------|
+| 200 | Success; body has `meta` and `tasks` (possibly empty). |
+| 401 | Unauthorized; send valid `Authorization: Bearer <AUTH_SECRET>`. |
+| 500 / 503 | Server or config error; retry or show error message. |
+
+### Example: fetch and use in code
+
+```bash
+# No auth
+curl -s http://localhost:8089/overview
+
+# With auth
+curl -s -H "Authorization: Bearer YOUR_AUTH_SECRET" http://localhost:8089/overview
+```
+
+Client logic (pseudocode):
+
+1. `GET <base_url>/overview` (with `Authorization` header if auth is enabled).
+2. On 200: parse JSON; render `response.tasks` (e.g. list or by `project`).
+3. Use `task.active` to style or order “active” vs “waiting”.
+4. If `response.meta.stale` is true, optionally show a stale indicator.
+5. On 401: fix or prompt for token. On 5xx: retry or show error.
+
+### CORS
+
+The bridge allows all origins (`allow_origins=["*"]`). If the display is a web app on another origin, it can call the API without CORS issues. For an Inky/embedded device doing direct HTTP, CORS does not apply.
+
+---
 
 ## Security
 
